@@ -1,0 +1,183 @@
+% Advanced Satellite Image Registration and Change Detection
+% Implements feature-based and multimodal registration with fine-scale correction
+% Supports SIFT features, multi-resolution pyramid, NDVI indices, mutual-information, and optical-flow refinement
+
+%% 1. Settings and Parameters
+folder           = 'C:/Users/jhall/OneDrive/Documents/GitHub/computer-vision-challenge/Datasets/Kuwait';  % Input folder path
+filePattern      = fullfile(folder, '*.jpg');  % Read JPEG for RGB images
+imageFiles       = dir(filePattern);
+[~, idx]         = sort({imageFiles.name});
+imageFiles       = imageFiles(idx);
+numImages        = numel(imageFiles);
+
+% Registration options
+useNDVI          = true;    % Compute and include NDVI channel if 4-band input exists
+usePyramid       = true;    % Use multi-resolution pyramid
+pyramidLevels    = 3;       % Number of pyramid levels
+useMutualInfo    = false;   % Use mutual-information-based registration as alternative
+useOpticalFlow   = true;    % Refine with Demons optical flow after global transform
+
+% Feature matching parameters
+featureDetector  = 'SIFT';  % Options: 'SIFT','KAZE'
+matchMaxRatio    = 0.7;     % Lowe's ratio test threshold
+ransacMaxDist    = 2;       % RANSAC MaxDistance (pixels)
+ransacConfidence = 99.99;   % RANSAC confidence percentage
+ransacMaxTrials  = 5000;    % RANSAC maximum trials
+
+% Change detection threshold
+changeThreshold  = 0.2;     % Absolute gray-level difference threshold
+
+%% 2. Main Processing Loop
+for k = 1:numImages-1
+    %--- 2.1 Load images ---
+    Iref = imread(fullfile(folder, imageFiles(k).name));
+    Imov = imread(fullfile(folder, imageFiles(k+1).name));
+    
+    %--- Debug: show raw input images ---
+    figure('Name', sprintf('Debug Raw %d→%d', k, k+1), 'NumberTitle', 'off');
+    subplot(1,2,1), imshow(Iref), title('Reference Raw');
+    subplot(1,2,2), imshow(Imov), title('Moving Raw');
+
+    %--- 2.2 Histogram matching on each band ---
+    ImovMatched = zeros(size(Imov), 'like', Imov);
+    numBands = size(Imov,3);
+    for b = 1:numBands
+        ImovMatched(:,:,b) = imhistmatch(Imov(:,:,b), Iref(:,:,b));
+    end
+
+    %--- Debug: histogram matched images ---
+    figure('Name', sprintf('Debug HistMatch %d→%d', k, k+1), 'NumberTitle', 'off');
+    subplot(1,3,1), imshow(Iref), title('Reference');
+    subplot(1,3,2), imshow(Imov), title('Moving Before Match');
+    subplot(1,3,3), imshow(ImovMatched), title('Moving After Match');
+
+    %--- 2.3 Compute NDVI if available ---
+    if useNDVI && numBands >= 4
+        R1 = double(Iref(:,:,1)); NIR1 = double(Iref(:,:,4));
+        R2 = double(ImovMatched(:,:,1)); NIR2 = double(ImovMatched(:,:,4));
+        ndviRef = (NIR1 - R1) ./ (NIR1 + R1 + eps);
+        ndviMov = (NIR2 - R2) ./ (NIR2 + R2 + eps);
+        % Debug: show NDVI
+        figure('Name', sprintf('Debug NDVI %d→%d', k, k+1), 'NumberTitle', 'off');
+        subplot(1,2,1), imshow(mat2gray(ndviRef)), title('NDVI Reference');
+        subplot(1,2,2), imshow(mat2gray(ndviMov)), title('NDVI Moving');
+    else
+        ndviRef = [];
+        ndviMov = [];
+    end
+
+    %--- 2.4 Prepare channels for registration ---
+    grayRef = im2double(rgb2gray(Iref));
+    grayMov = im2double(rgb2gray(ImovMatched));
+    % Debug: show grayscale images
+    figure('Name', sprintf('Debug Gray %d→%d', k, k+1), 'NumberTitle', 'off');
+    subplot(1,2,1), imshow(grayRef), title('Gray Reference');
+    subplot(1,2,2), imshow(grayMov), title('Gray Moving');
+
+    if ~isempty(ndviRef)
+        refReg = cat(3, grayRef, mat2gray(ndviRef));
+        movReg = cat(3, grayMov, mat2gray(ndviMov));
+    else
+        refReg = grayRef;
+        movReg = grayMov;
+    end
+
+    %--- 2.5 Build image pyramids ---
+    if usePyramid
+        pyrRef = cell(pyramidLevels,1); pyrMov = cell(pyramidLevels,1);
+        for lvl = 1:pyramidLevels
+            scale = 1 / (2^(pyramidLevels-lvl));
+            pyrRef{lvl} = imresize(refReg, scale);
+            pyrMov{lvl} = imresize(movReg, scale);
+            % Debug: pyramid level
+            figure('Name', sprintf('Debug Pyramid L%d %d→%d', lvl, k, k+1), 'NumberTitle', 'off');
+            imshowpair(pyrRef{lvl}, pyrMov{lvl});
+            title(sprintf('Pyramid Level %d', lvl));
+        end
+    else
+        pyrRef = {refReg}; pyrMov = {movReg};
+    end
+
+    %--- 2.6 Coarse-to-fine registration ---
+    % initialize total transform as projective
+    tformTotal = projective2d(eye(3));
+    for lvl = 1:numel(pyrRef)
+        I1 = pyrRef{lvl}; I2 = pyrMov{lvl};
+        % Detect features
+        if strcmp(featureDetector, 'SIFT')
+            pts1 = detectSIFTFeatures(I1, 'ContrastThreshold', 0.01);
+            pts2 = detectSIFTFeatures(I2, 'ContrastThreshold', 0.01);
+        else
+            pts1 = detectKAZEFeatures(I1, 'Threshold', 0.001);
+            pts2 = detectKAZEFeatures(I2, 'Threshold', 0.001);
+        end
+        [f1, v1] = extractFeatures(I1, pts1);
+        [f2, v2] = extractFeatures(I2, pts2);
+        idx = matchFeatures(f1, f2, 'MaxRatio', matchMaxRatio, 'Unique', true);
+        matched1 = v1(idx(:,1)); matched2 = v2(idx(:,2));
+        % Debug: show matches
+        figure('Name', sprintf('Debug Matches L%d %d→%d', lvl, k, k+1), 'NumberTitle', 'off');
+        showMatchedFeatures(I1, I2, matched1, matched2, 'montage');
+        title(sprintf('Level %d: %d pairs', lvl, size(idx,1)));
+        if size(idx,1) < 4
+                        % fallback to identity projective transform
+            tform = projective2d(eye(3));
+        else
+            scaleF = 2^(pyramidLevels-lvl);
+            ptsFixed = matched1.Location * scaleF;
+            ptsMoving = matched2.Location * scaleF;
+            tform = estimateGeometricTransform2D(ptsMoving, ptsFixed, 'projective', ...
+                'MaxDistance', ransacMaxDist*scaleF, 'Confidence', ransacConfidence, 'MaxNumTrials', ransacMaxTrials);
+        end
+                % compose transforms using projective2d
+        tformTotal = projective2d(tform.T * tformTotal.T);
+    end
+
+    %--- 2.7 Optional mutual-information ---
+    if useMutualInfo
+        [opt, met] = imregconfig('multimodal');
+        tformMI = imregtform(ImovMatched, Iref, 'similarity', opt, met);
+        tformTotal = affine2d(tformMI.T * tformTotal.T);
+    end
+
+    %--- 2.8 Warp ---
+    refSize = size(grayRef);
+    outputRef = imref2d(refSize);
+    ImovWarp = imwarp(ImovMatched, tformTotal, 'OutputView', outputRef);
+    % Debug: warped
+    figure('Name', sprintf('Debug Warped %d→%d', k, k+1), 'NumberTitle', 'off'); imshow(ImovWarp), title('Warped');
+
+    %--- 2.9 Demons refinement ---
+    if useOpticalFlow
+        movGray = im2double(rgb2gray(ImovWarp));
+        [df,~] = imregdemons(movGray, grayRef, 200, 'AccumulatedFieldSmoothing',1.2);
+        % Apply Demons displacement field (no OutputView for displacement field syntax)
+        ImovWarp = imwarp(ImovWarp, df);
+        % Debug: refined
+        figure('Name', sprintf('Debug Refined %d→%d', k, k+1), 'NumberTitle', 'off'); imshow(ImovWarp), title('Refined');
+    end
+
+    %--- 2.10 Crop and debug ---
+    mask = rgb2gray(ImovWarp)>0;
+    stats = regionprops(mask, 'Area','BoundingBox'); [~,mi]=max([stats.Area]); bb=stats(mi).BoundingBox;
+    x=ceil(bb(1)); y=ceil(bb(2)); w=floor(bb(3)); h=floor(bb(4));
+    IrefC = Iref(y:y+h-1, x:x+w-1,:);
+    ImovC = ImovWarp(y:y+h-1, x:x+w-1,:);
+    figure('Name', sprintf('Debug Cropped %d→%d', k, k+1), 'NumberTitle', 'off');
+    subplot(1,2,1), imshow(IrefC), title('Cropped Ref');
+    subplot(1,2,2), imshow(ImovC), title('Cropped Mov');
+
+    %--- 2.11 Change Detection ---
+    G1 = im2double(rgb2gray(IrefC)); G2 = im2double(rgb2gray(ImovC));
+    diffMap = abs(G2 - G1); maskCh = diffMap>changeThreshold;
+    redOv = uint8(cat(3, maskCh, false(size(maskCh)), false(size(maskCh))))*255;
+    overlay = imadd(ImovC, redOv);
+
+    %--- 2.12 Final Result ---
+    figure('Name', sprintf('Result %d→%d', k, k+1), 'NumberTitle', 'off');
+    subplot(1,3,1), imshow(IrefC), title('Ref Cropped');
+    subplot(1,3,2), imshow(ImovC), title('Mov Cropped');
+    subplot(1,3,3), imshow(overlay), title('Detected Changes');
+end
+
+%% End of Script
