@@ -3,7 +3,11 @@
 % excludes bottom 15% region for change detection, but shows full image including the lower border
 
 %% 1. Settings and Parameters
-folder           = 'C:/Users/jhall/OneDrive/Documents/GitHub/computer-vision-challenge/Datasets/Brazilian Rainforest';  % Input folder path
+
+% Determine the folder where this function is
+scriptDir = fileparts(mfilename('fullpath'));
+% Build the path
+folder    = fullfile(scriptDir, 'Datasets', 'Brazilian Rainforest');
 filePattern      = fullfile(folder, '*.jpg');  % Process only 2D RGB images
 imageFiles       = dir(filePattern);
 [~, idx]         = sort({imageFiles.name});
