@@ -1,64 +1,63 @@
-% Determine the script directory and the images directory
-scriptDir   = fileparts(mfilename('fullpath'));
-folder      = fullfile(scriptDir, 'Datasets', 'Frauenkirche/');
-% Check if the image was loaded successfully
-if isempty(Iorig)
-    error('The image %s could not be loaded.', imageFiles(k).name);
-end
+%% Main Script: Register, crop, and display batch images
 
-% Check if the transformation is valid
-if k > 1 && isempty(tforms(k).T)
-    error('The transformation for image %d is invalid.', k);
-end
+% 1. Determine script and images directory
+scriptDir = fileparts(mfilename('fullpath'));
+folder    = fullfile(scriptDir, 'Datasets', 'Kuwait/');
 
-% Check if the cropped image is not empty
-if isempty(Icrop)
-    warning('The cropped image for %s is empty and will not be saved.', imageFiles(k).name);
-else
-    imwrite(Icrop, fullfile(croppedDir, imageFiles(k).name));
+% 2. Gather all .jpg and .JPG files, sort alphabetically
+files1 = dir(fullfile(folder, '*.jpg'));
+files2 = dir(fullfile(folder, '*.JPG'));
+imageFiles = [files1; files2];
+if isempty(imageFiles)
+    error('No images found in folder "%s".', folder);
 end
-filePattern = fullfile(folder, '*.jpg');  % only 2D RGB images
-imageFiles  = dir(filePattern);
-[~, idx]    = sort({imageFiles.name});
-imageFiles  = imageFiles(idx);
-numImages   = numel(imageFiles);
+[~, idx] = sort({imageFiles.name});
+imageFiles = imageFiles(idx);
+numImages = numel(imageFiles);
 
-% 1. Read reference image and prepare grayscale version
-tmp      = imread(fullfile(folder, imageFiles(1).name));
-IrefRGB  = tmp;
+% 3. Read reference image (first one) and prepare grayscale version
+IrefRGB  = imread(fullfile(folder, imageFiles(1).name));
 IrefGray = im2double(rgb2gray(IrefRGB));
-
-% --- NEW: Calculate ROI for SURF (top 85 % of the image) ---
+IrefGray = im2double(rgb2gray(IrefRGB));
+IrefGray = adapthisteq(IrefGray, 'ClipLimit',0.02, 'NumTiles',[8 8]);
+IrefGray = imadjust(IrefGray, stretchlim(IrefGray,[0.01 0.99]));
+IrefGray = IrefGray .^ 0.8;
+IrefGray = imgaussfilt(IrefGray, 1);
+IrefGray = imsharpen(IrefGray, 'Radius',1, 'Amount',1);
+% 4. Define SURF ROI (top 90% of the image)
 [refH, refW] = size(IrefGray);
-cutoffRow    = floor(refH * 0.90);         % Row up to which we apply SURF
-surfROI      = [1, 1, refW, cutoffRow];    % [x, y, width, height]
+cutoffRow    = floor(refH * 0.90);
+surfROI      = [1, 1, refW, cutoffRow];
 
-% 2. Define output reference for all warps
+% 5. Initialize transformation array and output reference
 outputView = imref2d(size(IrefGray));
-
-% 3. Initialization: transformations array and global mask
 tforms     = repmat(affine2d(eye(3)), 1, numImages);
 
-% 4. Loop: Estimate transformations
+% 6. Loop: Estimate transformations for all images (except reference)
 for k = 2:numImages
-    % 4.1 Load image & histogram matching
     I2RGB     = imread(fullfile(folder, imageFiles(k).name));
-    I2matched = zeros(size(I2RGB), 'like', I2RGB);
-    for c = 1:3
-        I2matched(:,:,c) = imhistmatch(I2RGB(:,:,c), IrefRGB(:,:,c));
-    end
-    I2gray = im2double(rgb2gray(I2matched));
-    
-    % 4.2 SURF feature matching only in upper image half (85 %)
-    pts1 = detectSURFFeatures(IrefGray, 'ROI', surfROI, ...
-    'MetricThreshold', 200, ...
-    'NumOctaves', 6, ...
-    'NumScaleLevels', 10);
+    I2matched = histMatchToRef(I2RGB, IrefRGB);
+    I2gray    = im2double(rgb2gray(I2matched));
+    I2RGB   = imread(fullfile(folder, imageFiles(k).name));
+I2match = histMatchToRef(I2RGB, IrefRGB);
 
-    pts2 = detectSURFFeatures(I2gray, 'ROI', surfROI, ...
-    'MetricThreshold', 200, ...
-    'NumOctaves', 6, ...
-    'NumScaleLevels', 10);
+% Graustufen
+I2gray = im2double(rgb2gray(I2match));
+
+% 1) Lokales CLAHE
+I2gray = adapthisteq(I2gray, 'ClipLimit',0.02, 'NumTiles',[8 8]);
+
+% 2) Globales Strecken
+I2gray = imadjust(I2gray, stretchlim(I2gray,[0.01 0.99]));
+
+% 3) Gamma-Korrektur
+I2gray = I2gray .^ 0.8;
+
+% 4) Glätten + Schärfen
+I2gray = imgaussfilt(I2gray, 1);
+I2gray = imsharpen(I2gray, 'Radius',1, 'Amount',1);
+    pts1 = detectSURFFeatures(IrefGray, 'MetricThreshold', 100);
+    pts2 = detectSURFFeatures(I2gray,    'MetricThreshold', 100);
     
     [f1, vpts1] = extractFeatures(IrefGray, pts1);
     [f2, vpts2] = extractFeatures(I2gray,    pts2);
@@ -66,37 +65,36 @@ for k = 2:numImages
     matched1    = vpts1(idxPairs(:,1));
     matched2    = vpts2(idxPairs(:,2));
     
-    % Estimate similarity transformation
-    tforms(k) = estimateGeometricTransform(matched2, matched1, ...
-                   'similarity', 'MaxDistance', 4, ...
-                   'Confidence',  99.9, ...
-                   'MaxNumTrials',3000);
+    if isempty(idxPairs)
+        error('No matching features found between image %d and reference.', k);
+    end
+    
+    tforms(k) = estimateGeometricTransform(...
+    matched2, matched1, ...
+    'similarity', ...      % statt 'projective'
+    'MaxDistance',   12, ...    % erlaubt größere Abweichungen
+    'Confidence',    99, ...    % stoppt früher
+    'MaxNumTrials', 5000);      % mehr Versuche
 end
 
-% === Step 5: Automatic determination of the common non-black area ===
+% 7. Automatic determination of the common crop region (bounding box)
 BB = zeros(numImages,4);  % [xmin, ymin, width, height]
 for k = 1:numImages
-    % 5.1 Load image, match & warp
     Iorig = imread(fullfile(folder, imageFiles(k).name));
     if k > 1
-        Itemp = zeros(size(Iorig), 'like', Iorig);
-        for c = 1:3
-            Itemp(:,:,c) = imhistmatch(Iorig(:,:,c), IrefRGB(:,:,c));
-        end
+        Itemp = histMatchToRef(Iorig, IrefRGB);
         Iw = imwarp(Itemp, tforms(k), 'OutputView', outputView);
     else
         Iw = Iorig;
     end
-    
-    % 5.2 Create mask of all non-black pixels
     mask = any(Iw~=0,3);
-    
-    % 5.3 Determine bounding box of this mask
     s = regionprops(mask, 'BoundingBox');
-    BB(k,:) = s.BoundingBox;
+    if isempty(s)
+        error('Image "%s" is empty after transformation.', imageFiles(k).name);
+    end
+    BB(k,:) = s(1).BoundingBox;
 end
 
-% 5.4 Calculate common crop
 x0 = max(BB(:,1));
 y0 = max(BB(:,2));
 x1 = min(BB(:,1) + BB(:,3));
@@ -105,62 +103,62 @@ w  = x1 - x0;
 h  = y1 - y0;
 rect = [ floor(x0)+1, floor(y0)+1, floor(w), floor(h) ];
 
-% 5a. Create output folder for cropped images
+% 8. Create output directory for crops
 croppedDir = fullfile(folder, 'common_crop');
 if ~exist(croppedDir, 'dir')
     mkdir(croppedDir);
 end
 
-% === Step 6: Crop and save all images ===
+% 9. Crop and save all images
 for k = 1:numImages
     Iorig = imread(fullfile(folder, imageFiles(k).name));
     if k > 1
-        Itemp = zeros(size(Iorig), 'like', Iorig);
-        for c = 1:3
-            Itemp(:,:,c) = imhistmatch(Iorig(:,:,c), IrefRGB(:,:,c));
-        end
-        Iw = imwarp(Itemp, tforms(k), 'OutputView', outputView);
+        Itemp = histMatchToRef(Iorig, IrefRGB);
+        Iw    = imwarp(Itemp, tforms(k), 'OutputView', outputView);
     else
-        Iw = Iorig;
+        Iw    = Iorig;
     end
     
-    Icrop = imcrop(Iw, rect);
-    imwrite(Icrop, fullfile(croppedDir, imageFiles(k).name));
+    % Berechne Crop-Rechteck
+    [hIw, wIw, ~] = size(Iw);
+    xEnd = min(rect(1)+rect(3)-1, wIw);
+    yEnd = min(rect(2)+rect(4)-1, hIw);
+    cropRect = [rect(1), rect(2), xEnd-rect(1), yEnd-rect(2)];
+    
+    try
+        Icrop = imcrop(Iw, cropRect);
+        if isempty(Icrop)
+            warning('Leerer Crop für "%s". Fallback aufs Originalbild.', imageFiles(k).name);
+            Icrop = Iorig;
+        end
+    catch ME
+        warning('Crop-Fehler bei "%s": %s\nFallback aufs Originalbild.', imageFiles(k).name, ME.message);
+        Icrop = Iorig;
+    end
+    
+    % Speichern
+    outPath = fullfile(croppedDir, imageFiles(k).name);
+    imwrite(Icrop, outPath);
 end
 
-% === Step 7: Comparison and display loop (optional) ===
+
+% 10. Comparison and display loop (optional)
 for k = 2:numImages
     I2RGB     = imread(fullfile(folder, imageFiles(k).name));
-    I2matched = zeros(size(I2RGB), 'like', I2RGB);
-    for c = 1:3
-        I2matched(:,:,c) = imhistmatch(I2RGB(:,:,c), IrefRGB(:,:,c));
-    end
-    I2regRGB = imwarp(I2matched, tforms(k), 'OutputView', outputView);
-    
+    I2matched = histMatchToRef(I2RGB, IrefRGB);
+    I2regRGB  = imwarp(I2matched, tforms(k), 'OutputView', outputView);
     I1c = imcrop(IrefRGB, rect);
     I2c = imcrop(I2regRGB, rect);
-    
-    % --- Commented out: difference and red overlay ---
-    % G1        = im2double(rgb2gray(I1c));
-    % G2        = im2double(rgb2gray(I2c));
-    % diff      = abs(G2 - G1);
-    % threshold = 0.2;
-    % changeMask= diff > threshold;
-    % redMask   = uint8(cat(3, changeMask, zeros(size(changeMask)), zeros(size(changeMask)))) * 255;
-    % overlay   = imadd(I2c, redMask);
-    
     figure('Name', sprintf('Comparison Ref → Image %d', k), 'NumberTitle', 'off');
-    subplot(1,3,1), imshow(I1c),    title(['Ref: '   imageFiles(1).name], 'Interpreter', 'none');
-    subplot(1,3,2), imshow(I2c),    title(['Mov: '   imageFiles(k).name], 'Interpreter', 'none');
-    %subplot(1,3,3), imshow(overlay), title('Changes (red)'); % <--- Commented out
+    subplot(1,2,1), imshow(I1c), title(['Ref: ' imageFiles(1).name], 'Interpreter', 'none');
+    subplot(1,2,2), imshow(I2c), title(['Mov: ' imageFiles(k).name], 'Interpreter', 'none');
 end
 
-% Montage of all common crops
+% 11. Show all common crops as montage
 cropFiles = dir(fullfile(croppedDir, '*.jpg'));
 numCrop   = numel(cropFiles);
 cols      = ceil(sqrt(numCrop));
 rows      = ceil(numCrop/cols);
-
 figure('Name','All common crops','NumberTitle','off');
 for k = 1:numCrop
     I = imread(fullfile(croppedDir, cropFiles(k).name));
@@ -169,27 +167,38 @@ for k = 1:numCrop
     title(cropFiles(k).name, 'Interpreter', 'none', 'FontSize', 8);
     axis off;
 end
-% 4.3a Visualization of SURF points in upper 85 %
-    figure('Name', sprintf('SURF points image %d', k), 'NumberTitle', 'off');
-    
-    % Left half: reference image
-    subplot(1,2,1);
-    imshow(IrefGray);
-    title('Reference (upper 85 %)');
-    hold on;
-    % only show strongest 100 points (you can adjust this)
-    strongest1 = pts1.selectStrongest(100);
-    plot(strongest1);
-    % ROI as green box
-    rectangle('Position', surfROI, 'EdgeColor', 'g', 'LineWidth', 1);
-    hold off;
-    
-    % Right half: current image
-    subplot(1,2,2);
-    imshow(I2gray);
-    title(sprintf('Image %d: %s', k, imageFiles(k).name), 'Interpreter', 'none');
-    hold on;
-    strongest2 = pts2.selectStrongest(100);
-    plot(strongest2);
-    rectangle('Position', surfROI, 'EdgeColor', 'g', 'LineWidth', 1);
-    hold off;
+
+%{ 12. SURF points visualization loop
+for k = 2:numImages
+    I2RGB     = imread(fullfile(folder, imageFiles(k).name));
+    I2matched = histMatchToRef(I2RGB, IrefRGB);
+    I2gray    = im2double(rgb2gray(I2matched));
+    pts1 = detectSURFFeatures(IrefGray, 'ROI', surfROI, ...
+        'MetricThreshold', 200, 'NumOctaves', 6, 'NumScaleLevels', 10);
+    pts2 = detectSURFFeatures(I2gray, 'ROI', surfROI, ...
+        'MetricThreshold', 200, 'NumOctaves', 6, 'NumScaleLevels', 10);
+
+    %figure('Name', sprintf('SURF points Image %d', k), 'NumberTitle', 'off');
+    %subplot(1,2,1);
+    %imshow(IrefGray); title('Reference (top 90%)');
+    %hold on;
+    %strongest1 = pts1.selectStrongest(100);
+    %plot(strongest1);
+    %rectangle('Position', surfROI, 'EdgeColor', 'g', 'LineWidth', 1);
+    %hold off;
+    %subplot(1,2,2);
+    %imshow(I2gray); title(sprintf('Image %d: %s', k, imageFiles(k).name), 'Interpreter', 'none');
+    %hold on;
+    %strongest2 = pts2.selectStrongest(100);
+    %plot(strongest2);
+    %rectangle('Position', surfROI, 'EdgeColor', 'g', 'LineWidth', 1);
+    %hold off;
+end
+
+%% Helper function: Histogram matching of RGB images
+function Iout = histMatchToRef(Iin, Iref)
+    Iout = zeros(size(Iin), 'like', Iin);
+    for c = 1:size(Iin,3)
+        Iout(:,:,c) = imhistmatch(Iin(:,:,c), Iref(:,:,c));
+    end
+end
