@@ -2,7 +2,7 @@
 
 % 1. Determine script and images directory
 scriptDir = fileparts(mfilename('fullpath'));
-folder    = fullfile(scriptDir, 'Datasets', 'Kuwait/');
+folder    = fullfile(scriptDir, 'Datasets', 'Wiesn/');
 
 % 2. Gather all .jpg and .JPG files, sort alphabetically
 files1 = dir(fullfile(folder, '*.jpg'));
@@ -18,12 +18,7 @@ numImages = numel(imageFiles);
 % 3. Read reference image (first one) and prepare grayscale version
 IrefRGB  = imread(fullfile(folder, imageFiles(1).name));
 IrefGray = im2double(rgb2gray(IrefRGB));
-IrefGray = im2double(rgb2gray(IrefRGB));
-IrefGray = adapthisteq(IrefGray, 'ClipLimit',0.02, 'NumTiles',[8 8]);
-IrefGray = imadjust(IrefGray, stretchlim(IrefGray,[0.01 0.99]));
-IrefGray = IrefGray .^ 0.8;
-IrefGray = imgaussfilt(IrefGray, 1);
-IrefGray = imsharpen(IrefGray, 'Radius',1, 'Amount',1);
+
 % 4. Define SURF ROI (top 90% of the image)
 [refH, refW] = size(IrefGray);
 cutoffRow    = floor(refH * 0.90);
@@ -38,43 +33,38 @@ for k = 2:numImages
     I2RGB     = imread(fullfile(folder, imageFiles(k).name));
     I2matched = histMatchToRef(I2RGB, IrefRGB);
     I2gray    = im2double(rgb2gray(I2matched));
-    I2RGB   = imread(fullfile(folder, imageFiles(k).name));
-I2match = histMatchToRef(I2RGB, IrefRGB);
-
-% Graustufen
-I2gray = im2double(rgb2gray(I2match));
-
-% 1) Lokales CLAHE
-I2gray = adapthisteq(I2gray, 'ClipLimit',0.02, 'NumTiles',[8 8]);
-
-% 2) Globales Strecken
-I2gray = imadjust(I2gray, stretchlim(I2gray,[0.01 0.99]));
-
-% 3) Gamma-Korrektur
-I2gray = I2gray .^ 0.8;
-
-% 4) Glätten + Schärfen
-I2gray = imgaussfilt(I2gray, 1);
-I2gray = imsharpen(I2gray, 'Radius',1, 'Amount',1);
-    pts1 = detectSURFFeatures(IrefGray, 'MetricThreshold', 100);
-    pts2 = detectSURFFeatures(I2gray,    'MetricThreshold', 100);
     
-    [f1, vpts1] = extractFeatures(IrefGray, pts1);
-    [f2, vpts2] = extractFeatures(I2gray,    pts2);
-    idxPairs    = matchFeatures(f1, f2, 'Unique', true);
-    matched1    = vpts1(idxPairs(:,1));
-    matched2    = vpts2(idxPairs(:,2));
-    
-    if isempty(idxPairs)
-        error('No matching features found between image %d and reference.', k);
+    try
+        % --- SURF-basiertes Matching ---
+        pts1 = detectSURFFeatures(IrefGray, 'ROI', surfROI, ...
+            'MetricThreshold', 200, 'NumOctaves', 6, 'NumScaleLevels', 10);
+        pts2 = detectSURFFeatures(I2gray, 'ROI', surfROI, ...
+            'MetricThreshold', 200, 'NumOctaves', 6, 'NumScaleLevels', 10);
+
+        [f1, vpts1] = extractFeatures(IrefGray, pts1);
+        [f2, vpts2] = extractFeatures(I2gray,    pts2);
+        idxPairs    = matchFeatures(f1, f2, 'Unique', true);
+        if isempty(idxPairs)
+            error('NoMatches');
+        end
+        matched1 = vpts1(idxPairs(:,1));
+        matched2 = vpts2(idxPairs(:,2));
+
+        % Geometrische Transformati on schätzen
+        tforms(k) = estimateGeometricTransform(matched2, matched1, ...
+            'similarity', 'MaxDistance',35, ...
+            'Confidence',99.9, 'MaxNumTrials',5000);
+
+    catch ME
+        % --- Fallback: Intensitätsbasierte Registrierung ---
+        warning('SURF failed for image %d (%s): %s\nFalling back to imregtform.', ...
+                k, imageFiles(k).name, ME.message);
+        tforms(k) = imregtform(...
+            I2gray, IrefGray, ...        % moving, fixed
+            'similarity', ...             % Einstellungen analog
+            optimizerConfig(), ...
+            metricConfig());
     end
-    
-    tforms(k) = estimateGeometricTransform(...
-    matched2, matched1, ...
-    'similarity', ...      % statt 'projective'
-    'MaxDistance',   12, ...    % erlaubt größere Abweichungen
-    'Confidence',    99, ...    % stoppt früher
-    'MaxNumTrials', 5000);      % mehr Versuche
 end
 
 % 7. Automatic determination of the common crop region (bounding box)
@@ -114,33 +104,22 @@ for k = 1:numImages
     Iorig = imread(fullfile(folder, imageFiles(k).name));
     if k > 1
         Itemp = histMatchToRef(Iorig, IrefRGB);
-        Iw    = imwarp(Itemp, tforms(k), 'OutputView', outputView);
+        Iw = imwarp(Itemp, tforms(k), 'OutputView', outputView);
     else
-        Iw    = Iorig;
+        Iw = Iorig;
     end
-    
-    % Berechne Crop-Rechteck
+    % Make sure crop rectangle fits within image bounds
     [hIw, wIw, ~] = size(Iw);
     xEnd = min(rect(1)+rect(3)-1, wIw);
     yEnd = min(rect(2)+rect(4)-1, hIw);
     cropRect = [rect(1), rect(2), xEnd-rect(1), yEnd-rect(2)];
-    
-    try
-        Icrop = imcrop(Iw, cropRect);
-        if isempty(Icrop)
-            warning('Leerer Crop für "%s". Fallback aufs Originalbild.', imageFiles(k).name);
-            Icrop = Iorig;
-        end
-    catch ME
-        warning('Crop-Fehler bei "%s": %s\nFallback aufs Originalbild.', imageFiles(k).name, ME.message);
-        Icrop = Iorig;
+    Icrop = imcrop(Iw, cropRect);
+    if isempty(Icrop)
+        warning('The cropped image of "%s" is empty and will not be saved.', imageFiles(k).name);
+    else
+        imwrite(Icrop, fullfile(croppedDir, imageFiles(k).name));
     end
-    
-    % Speichern
-    outPath = fullfile(croppedDir, imageFiles(k).name);
-    imwrite(Icrop, outPath);
 end
-
 
 % 10. Comparison and display loop (optional)
 for k = 2:numImages
@@ -153,7 +132,8 @@ for k = 2:numImages
     subplot(1,2,1), imshow(I1c), title(['Ref: ' imageFiles(1).name], 'Interpreter', 'none');
     subplot(1,2,2), imshow(I2c), title(['Mov: ' imageFiles(k).name], 'Interpreter', 'none');
 end
-
+showMatchedFeatures(IrefGray, I2gray, matched1, matched2);
+title(sprintf('Residual errors ≤ %d px'));
 % 11. Show all common crops as montage
 cropFiles = dir(fullfile(croppedDir, '*.jpg'));
 numCrop   = numel(cropFiles);
@@ -201,4 +181,15 @@ function Iout = histMatchToRef(Iin, Iref)
     for c = 1:size(Iin,3)
         Iout(:,:,c) = imhistmatch(Iin(:,:,c), Iref(:,:,c));
     end
+end
+function opt = optimizerConfig()
+    opt = registration.optimizer.OnePlusOneEvolutionary();
+    opt.GrowthFactor   = 1.05;
+    opt.InitialRadius  = 0.006;
+    opt.Epsilon        = 1.5e-4;
+    opt.MaximumIterations = 200;
+end
+
+function m = metricConfig()
+    m = registration.metric.MeanSquares();
 end
