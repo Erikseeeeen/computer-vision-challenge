@@ -79,6 +79,18 @@ function waterSegmentationResults = WaterBodySegment(imagePath)
     blue_channel_overlay = overlay(:,:,3);
     blue_channel_overlay(final_water_mask) = 255;
     overlay(:,:,3) = blue_channel_overlay;
+
+    % blueChannel  = uint8(final_water_mask) * 255;
+    % alphaChannel = blueChannel;
+    % overlay = cat(3, ...                          % [rows × cols × 4]  uint8
+    %           zeros(size(blueChannel), 'uint8'), ...  % R = 0
+    %           zeros(size(blueChannel), 'uint8'), ...  % G = 0
+    %           blueChannel, ...                        % B = blue mask
+    %           alphaChannel);                          % A = mask-driven alpha
+    % waterSegmentationResults.overlay = overlay;
+
+
+
     waterSegmentationResults.overlayImage = overlay;
 
     waterSegmentationResults.confidenceMap = ensemble_score;
