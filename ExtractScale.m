@@ -1,4 +1,4 @@
-function ExtractScale(currentLocation)
+function m_per_pixel = ExtractScale(currentLocation)
     % Extracts the scale from an image located in a specified folder.
     % Reads an image from the specified subfolder, processes it to identify the scale bar,
     % and calculates the scale in meters per pixel.
