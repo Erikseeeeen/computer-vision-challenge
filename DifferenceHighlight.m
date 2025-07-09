@@ -1,4 +1,4 @@
-function overlay = DifferenceHighlight(A, B) 
+function results = DifferenceHighlight(A, B) 
     differenceTolerance = 10;
     A = double(A);
     B = double(B);
@@ -7,4 +7,8 @@ function overlay = DifferenceHighlight(A, B)
     overlay = zeros(size(A), 'like', A);
     
     overlay(:,:,1) = differenceMask;
+
+    results = struct();
+    results.overlayImage = overlay;
+    results.overlayAlpha = uint8(differenceMask) * 255;
 end
