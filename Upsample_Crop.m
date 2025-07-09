@@ -437,39 +437,72 @@ function upsampled = gradient_preserving_upsample(img, scale_factor, options)
 end
 
 function result = apply_gradient_preservation(lr_img, hr_img, X, Y, X_hr, Y_hr, weight)
+% Computes the gradient corrections, and applies them to enhance the high-resolution image
+    
+    % Compute the gradients of the low-resolution image in the x and y directions
     [gx_lr, gy_lr] = imgradientxy(lr_img);
+
+    % Interpolate the low-resolution gradients to the high-resolution grid using cubic interpolation
     gx_hr = interp2(X, Y, gx_lr, X_hr, Y_hr, 'cubic', 0);
     gy_hr = interp2(X, Y, gy_lr, X_hr, Y_hr, 'cubic', 0);
+
+    % Compute the gradients of the current high-resolution image
     [gx_current, gy_current] = imgradientxy(hr_img);
-    
+
+     % Calculate the gradient corrections for both x and y directions    
     grad_correction_x = weight * (gx_hr - gx_current);
     grad_correction_y = weight * (gy_hr - gy_current);
+
+    % Apply convolution to smooth the gradient corrections
     correction = conv2(grad_correction_x, [-1 1], 'same') + ...
                 conv2(grad_correction_y, [-1; 1], 'same');
     
+    % Enhance the high-resolution image by adding a fraction of the correction
     result = hr_img + 0.3 * correction;
 end
 
 function result = apply_adaptive_unsharp(img, sigma)
+% Applies adaptive unsharp masking to enhance image sharpness.
+
+    % Calculate the local variance of the image using a 5x5 neighborhood
     local_var = stdfilt(img, ones(5,5));
+
+    % Normalize the local variance to the range [0, 1]
     local_var = local_var / max(local_var(:));
+
+    % Apply Gaussian blur to the image using the specified sigma
     blurred = imgaussfilt(img, sigma);
+
+    % Calculate the unsharp strength based on local variance
     unsharp_strength = 0.5 + 1.0 * local_var;
+
+    % Apply the unsharp mask by adding the weighted difference between the original
+    % and blurred images to the original image
     result = img + unsharp_strength .* (img - blurred);
 end
 
 function result = apply_structure_tensor_enhancement(img, sigma)
+% Enhances an image using structure tensor analysis.
+
+    % Compute the gradients of the image in the x and y directions
     [gx, gy] = imgradientxy(img);
+
+    % Calculate the components of the structure tensor
     J11 = imgaussfilt(gx.^2, sigma);
     J12 = imgaussfilt(gx.*gy, sigma);
     J22 = imgaussfilt(gy.^2, sigma);
-    
+
+    % Compute the trace and determinant of the structure tensor 
     trace_j = J11 + J22;
     det_j = J11.*J22 - J12.^2;
     coherence = (trace_j - 2*sqrt(det_j + eps)) ./ (trace_j + eps);
+
+    % Calculate the coherence measure
     enhancement_strength = 0.3 * coherence;
     
+    % Attempt to enhance the image using imsharpen
     try
+        % Fallback to convolution with a sharpening kernel if imsharpen fails
         enhanced = imsharpen(img, 'Amount', 1.0);
         result = img + enhancement_strength .* (enhanced - img);
     catch
@@ -480,40 +513,62 @@ function result = apply_structure_tensor_enhancement(img, sigma)
 end
 
 function result = apply_frequency_enhancement(img, boost_factor)
+% Enhances an image in the frequency domain
+    % Compute the 2D Fourier transform of the image
     F = fft2(img);
+
+    % Shift the zero-frequency component to the center of the spectrum
     F_shifted = fftshift(F);
+
+    % Get the dimensions of the image
     [h, w] = size(img);
+
+    % Create a meshgrid for frequency coordinates
     [u, v] = meshgrid(-w/2:w/2-1, -h/2:h/2-1);
+
+    % Calculate the distance from the origin in the frequency domain
     D = sqrt(u.^2 + v.^2);
+
+    % Create a boost filter based on the distance
     H = 1 + boost_factor * (D / max(D(:)));
+
+    % Apply the boost filter to the shifted Fourier transform
     F_enhanced = F_shifted .* H;
+
+    % Shift back the enhanced Fourier transform
     F_enhanced = ifftshift(F_enhanced);
+
+    % Compute the inverse Fourier transform to get the enhanced image
     result = real(ifft2(F_enhanced));
 end
 
 function result = apply_multiscale_enhancement(img, num_scales)
-    result = img;
+% Enhances an image using multiscale detail extraction
+    result = img;  % Initialize the result with the original image
     for scale = 1:num_scales
-        sigma = 2^(scale-1);
-        blurred = imgaussfilt(result, sigma);
-        detail = result - blurred;
-        detail_strength = 1.0 / scale;
-        result = result + detail_strength * detail;
+        sigma = 2^(scale-1);  % Calculate the standard deviation for Gaussian blur
+        blurred = imgaussfilt(result, sigma);  % Apply Gaussian blur
+        detail = result - blurred;  % Extract details by subtracting blurred image from original
+        detail_strength = 1.0 / scale;  % Determine the strength of the detail to add back
+        result = result + detail_strength * detail;  % Combine details back into the result
     end
 end
 
 function sharpness = calculate_sharpness(img)
+% Computes the sharpness of an image.
     gray = rgb2gray(img);
     sharpness = mean(imgradient(gray), 'all');
 end
 
 function grad_mag = calculate_gradient_magnitude(img)
+% Computes the gradient magnitude of an image.
     gray = rgb2gray(img);
     [gx, gy] = imgradientxy(gray);
     grad_mag = mean(sqrt(gx.^2 + gy.^2), 'all');
 end
 
 function edge_density = calculate_edge_density(img)
+% Computes the edge density of an image.
     gray = rgb2gray(img);
     edges = edge(gray, 'Canny');
     edge_density = sum(edges(:)) / numel(edges);
