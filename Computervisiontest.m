@@ -2,7 +2,7 @@
 
 % 1. Determine script and images directory
 scriptDir = fileparts(mfilename('fullpath'));
-folder    = fullfile(scriptDir, 'Datasets', 'Wiesn/');
+folder    = fullfile(scriptDir, 'Datasets', 'Mali Sahel/');
 
 % 2. Gather all .jpg and .JPG files, sort alphabetically
 files1 = dir(fullfile(folder, '*.jpg'));

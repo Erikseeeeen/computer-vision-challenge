@@ -3,15 +3,17 @@ function analysis_output = vegetation_VARI(path)
     %
     % This function reads an image from the specified path, calculates the 
     % Vegetation Index (VARI) using the red, green, and blue channels, 
-    % and generates a color overlay based on the VARI values.
+    % generates a color overlay based on the VARI values, and returns the
+    % average VARI value.
     %
     % Inputs:
     %   path - A string specifying the file path of the image to be processed.
     %
     % Outputs:
     %   analysis_output - A structure containing:
-    %       overlay - The VARI color overlay image.
-    %       name - The name of the analysis performed.
+    %       overlay  - The VARI color overlay image.
+    %       meanVARI - The average VARI value across the image.
+    %       name     - The name of the analysis performed.
     %
     % Example:
     %   output = vegetation_VARI('path/to/image.jpg');
@@ -20,15 +22,18 @@ function analysis_output = vegetation_VARI(path)
     img = imread(path);
 
     % Convert the RGB channels to double for calculation
-    red = double(img(:,:,1));
+    red   = double(img(:,:,1));
     green = double(img(:,:,2));
-    blue = double(img(:,:,3));
+    blue  = double(img(:,:,3));
 
     % Calculate the Vegetation Index (VARI)
     vari = (green - red) ./ (green + red - blue);
 
     % Clamp the VARI values to the range [-1, 1]
     variClamped = max(min(vari, 1), -1);
+
+    % Compute the average VARI (excluding NaNs)
+    meanVARI = mean(variClamped(:), 'omitnan');
 
     % Rescale the clamped VARI values to the range [0, 1]
     variGray = rescale(variClamped, 0, 1);
@@ -42,7 +47,11 @@ function analysis_output = vegetation_VARI(path)
     % Map the indexed image to RGB using the colormap
     variRGB = ind2rgb(index, cmap);
 
+    % Display the average VARI in the command window
+    fprintf('Average VARI: %.4f\n', meanVARI);
+
     % Store the results in the output structure
-    analysis_output.overlay = variRGB;
-    analysis_output.name = 'vegetation_VARI';
+    analysis_output.overlay  = variRGB;
+    analysis_output.meanVARI = meanVARI;
+    analysis_output.name     = 'vegetation_VARI';
 end
