@@ -1,4 +1,4 @@
 % Launch the app
 %Test for aligned pictures
-Computervisiontest;
+%Computervisiontest;
 app = main_app;
